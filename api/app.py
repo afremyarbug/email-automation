@@ -310,6 +310,27 @@ INDEX_HTML = """
     const msg = document.getElementById('message');
     const maxLeads = {{ max_leads_web }};
 
+    // Pre-fill form from URL params (?city=Mannheim&niche=Moving+companies&max_leads=10)
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const urlCities = params.getAll('city').map(c => decodeURIComponent(c));
+      const urlNiches = params.getAll('niche').map(n => decodeURIComponent(n));
+      const urlMax = params.get('max_leads');
+      const cityEl = document.getElementById('city');
+      const nicheEl = document.getElementById('niche');
+      const maxEl = document.getElementById('max_leads');
+      if (urlCities.length) {
+        Array.from(cityEl.options).forEach(opt => { opt.selected = urlCities.includes(opt.value); });
+      }
+      if (urlNiches.length) {
+        Array.from(nicheEl.options).forEach(opt => { opt.selected = urlNiches.includes(opt.value); });
+      }
+      if (urlMax) {
+        const n = parseInt(urlMax, 10);
+        if (n >= 1 && n <= maxLeads) maxEl.value = n;
+      }
+    })();
+
     function showMessage(text, type) {
       msg.textContent = text;
       msg.className = type || 'info';
@@ -357,7 +378,11 @@ INDEX_HTML = """
           a.click();
           URL.revokeObjectURL(a.href);
           const count = Math.max(0, text.trim().split('\n').length - 1);
-          showMessage('Done! ' + count + ' leads. CSV downloaded.', 'success');
+          if (count === 0) {
+            showMessage('0 leads found. Check: API key is set in Vercel (GOOGLE_PLACES_API_KEY), Places API is enabled for your key, and try different city/niche. Only businesses with website + email are included.', 'error');
+          } else {
+            showMessage('Done! ' + count + ' leads. CSV downloaded.', 'success');
+          }
           setLoading(false);
           return;
         }

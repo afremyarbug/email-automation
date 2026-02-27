@@ -19,6 +19,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+
+class GooglePlacesAPIError(Exception):
+    """Raised when Google Places API returns an error (e.g. REQUEST_DENIED, OVER_QUERY_LIMIT)."""
+
+
 # Constants
 CITIES = [
     # Original 8 (Baden-Württemberg)
@@ -292,7 +297,13 @@ def text_search(
     except json.JSONDecodeError:
         return [], None
     if out.get("status") not in ("OK", "ZERO_RESULTS"):
-        logging.warning("API %s: %s", out.get("status"), out.get("error_message", ""))
+        status = out.get("status", "UNKNOWN")
+        err_msg = out.get("error_message", "")
+        logging.warning("API %s: %s", status, err_msg)
+        if status in ("REQUEST_DENIED", "OVER_QUERY_LIMIT", "INVALID_REQUEST"):
+            raise GooglePlacesAPIError(
+                f"Google Places API {status}: {err_msg or 'Check your API key and that Places API is enabled.'}"
+            )
         return [], None
     results = out.get("results", [])
     next_token = out.get("next_page_token") if out.get("status") == "OK" else None
@@ -336,6 +347,12 @@ def place_details(place_id: str, api_key: str) -> dict:
     except json.JSONDecodeError:
         return {}
     if out.get("status") != "OK":
+        status = out.get("status", "UNKNOWN")
+        err_msg = out.get("error_message", "")
+        if status in ("REQUEST_DENIED", "OVER_QUERY_LIMIT", "INVALID_REQUEST"):
+            raise GooglePlacesAPIError(
+                f"Google Places API {status}: {err_msg or 'Check your API key and that Places API is enabled.'}"
+            )
         return {}
     return out.get("result", {})
 
