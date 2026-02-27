@@ -20,6 +20,120 @@ from threading import Thread
 
 from flask import Flask, Response, jsonify, render_template_string, request, send_file
 
+# Static script: no template vars, so URL/query string can never be injected into JS.
+LEADS_FORM_JS = r"""
+(function () {
+  var form = document.getElementById('form');
+  var btn = document.getElementById('btn');
+  var msg = document.getElementById('message');
+  var maxLeads = parseInt(form.getAttribute('data-max-leads'), 10) || 1000;
+
+  var params = new URLSearchParams(window.location.search);
+  var urlCities = params.getAll('city').map(function (c) { try { return decodeURIComponent(c); } catch (e) { return c; } });
+  var urlNiches = params.getAll('niche').map(function (n) { try { return decodeURIComponent(n); } catch (e) { return n; } });
+  var urlMax = parseInt(params.get('max_leads'), 10);
+  var cityEl = document.getElementById('city');
+  var nicheEl = document.getElementById('niche');
+  var maxEl = document.getElementById('max_leads');
+  if (urlCities.length > 0 && cityEl) {
+    Array.from(cityEl.options).forEach(function (opt) { opt.selected = urlCities.indexOf(opt.value) !== -1; });
+  }
+  if (urlNiches.length > 0 && nicheEl) {
+    Array.from(nicheEl.options).forEach(function (opt) { opt.selected = urlNiches.indexOf(opt.value) !== -1; });
+  }
+  if (!isNaN(urlMax) && urlMax >= 1 && urlMax <= maxLeads && maxEl) {
+    maxEl.value = urlMax;
+  }
+
+  function showMessage(text, type) {
+    msg.textContent = text;
+    msg.className = type || 'info';
+    msg.style.display = 'block';
+  }
+
+  function setLoading(loading) {
+    btn.disabled = loading;
+    btn.textContent = loading ? 'Collecting leads...' : 'Get leads';
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var cityEl = document.getElementById('city');
+    var nicheEl = document.getElementById('niche');
+    var selectedCities = Array.from(cityEl.selectedOptions).map(function (o) { return o.value; });
+    var selectedNiches = Array.from(nicheEl.selectedOptions).map(function (o) { return o.value; });
+    var maxLeadsVal = parseInt(document.getElementById('max_leads').value, 10) || 10;
+    if (selectedCities.length === 0 || selectedNiches.length === 0) {
+      showMessage('Select at least one city and one niche.', 'error');
+      return;
+    }
+    if (maxLeadsVal < 1 || maxLeadsVal > maxLeads) {
+      showMessage('Please enter between 1 and ' + String(maxLeads) + ' leads.', 'error');
+      return;
+    }
+    setLoading(true);
+    showMessage('Starting...', 'info');
+    fetch('/api/collect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        city: selectedCities,
+        niche: selectedNiches,
+        max_leads: maxLeadsVal
+      })
+    }).then(function (res) {
+      var contentType = res.headers.get('content-type') || '';
+      if (contentType.indexOf('text/csv') !== -1) {
+        return res.text().then(function (text) {
+          var a = document.createElement('a');
+          a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
+          a.download = 'leads.csv';
+          a.click();
+          URL.revokeObjectURL(a.href);
+          var count = Math.max(0, text.trim().split('\n').length - 1);
+          if (count === 0) {
+            showMessage('0 leads found. Check: API key is set in Vercel (GOOGLE_PLACES_API_KEY), Places API is enabled for your key, and try different city/niche. Only businesses with website + email are included.', 'error');
+          } else {
+            showMessage('Done! ' + count + ' leads. CSV downloaded.', 'success');
+          }
+          setLoading(false);
+        });
+      }
+      return res.json().then(function (data) {
+        if (!res.ok) {
+          showMessage(data.error || 'Request failed', 'error');
+          setLoading(false);
+          return;
+        }
+        var jobId = data.job_id;
+        showMessage('Collecting leads... This may take a few minutes.', 'info');
+        function check() {
+          fetch('/api/status/' + jobId).then(function (r) { return r.json(); }).then(function (s) {
+            if (s.status === 'done') {
+              showMessage('Done! ' + s.lead_count + ' leads. Download your CSV below.', 'success');
+              msg.innerHTML = 'Done! ' + s.lead_count + ' leads. <a class="download" href="/api/download/' + jobId + '">Download CSV</a>';
+              msg.className = 'success';
+              setLoading(false);
+              return;
+            }
+            if (s.status === 'error') {
+              showMessage('Error: ' + (s.error || 'Unknown'), 'error');
+              setLoading(false);
+              return;
+            }
+            setTimeout(check, 2500);
+          });
+        }
+        check();
+      });
+    }).catch(function (err) {
+      showMessage('Network error: ' + err.message, 'error');
+      setLoading(false);
+    });
+  });
+})();
+"""
+
 from scrape_businesses import (
     COLUMNS,
     CITIES,
@@ -77,6 +191,11 @@ def index():
         max_leads_web=max_leads,
         is_vercel=VERCEL,
     )
+
+
+@app.route("/static/leads-form.js")
+def leads_form_js():
+    return Response(LEADS_FORM_JS.strip(), mimetype="application/javascript; charset=utf-8")
 
 
 def _get_api_key():
@@ -286,14 +405,14 @@ INDEX_HTML = """
     <label for="city">Cities</label>
     <select id="city" name="city" multiple size="8">
       {% for c in cities %}
-      <option value="{{ c }}">{{ c }}</option>
+      <option value="{{ c | e }}">{{ c | e }}</option>
       {% endfor %}
     </select>
     <p class="hint">Hold Ctrl (Windows) or Cmd (Mac) to select multiple cities.</p>
     <label for="niche">Niches</label>
     <select id="niche" name="niche" multiple size="8">
       {% for n in niches %}
-      <option value="{{ n }}">{{ n }}</option>
+      <option value="{{ n | e }}">{{ n | e }}</option>
       {% endfor %}
     </select>
     <p class="hint">Hold Ctrl (Windows) or Cmd (Mac) to select multiple niches.</p>
@@ -304,118 +423,7 @@ INDEX_HTML = """
   </form>
   <div id="message" role="status"></div>
 
-  <script>
-    (function () {
-      var form = document.getElementById('form');
-      var btn = document.getElementById('btn');
-      var msg = document.getElementById('message');
-      var maxLeads = parseInt(form.getAttribute('data-max-leads'), 10) || 1000;
-
-      var params = new URLSearchParams(window.location.search);
-      var urlCities = params.getAll('city').map(function (c) { try { return decodeURIComponent(c); } catch (e) { return c; } });
-      var urlNiches = params.getAll('niche').map(function (n) { try { return decodeURIComponent(n); } catch (e) { return n; } });
-      var urlMax = parseInt(params.get('max_leads'), 10);
-      var cityEl = document.getElementById('city');
-      var nicheEl = document.getElementById('niche');
-      var maxEl = document.getElementById('max_leads');
-      if (urlCities.length > 0 && cityEl) {
-        Array.from(cityEl.options).forEach(function (opt) { opt.selected = urlCities.indexOf(opt.value) !== -1; });
-      }
-      if (urlNiches.length > 0 && nicheEl) {
-        Array.from(nicheEl.options).forEach(function (opt) { opt.selected = urlNiches.indexOf(opt.value) !== -1; });
-      }
-      if (!isNaN(urlMax) && urlMax >= 1 && urlMax <= maxLeads && maxEl) {
-        maxEl.value = urlMax;
-      }
-
-      function showMessage(text, type) {
-        msg.textContent = text;
-        msg.className = type || 'info';
-        msg.style.display = 'block';
-      }
-
-      function setLoading(loading) {
-        btn.disabled = loading;
-        btn.textContent = loading ? 'Collecting leads...' : 'Get leads';
-      }
-
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var cityEl = document.getElementById('city');
-        var nicheEl = document.getElementById('niche');
-        var selectedCities = Array.from(cityEl.selectedOptions).map(function (o) { return o.value; });
-        var selectedNiches = Array.from(nicheEl.selectedOptions).map(function (o) { return o.value; });
-        var maxLeadsVal = parseInt(document.getElementById('max_leads').value, 10) || 10;
-        if (selectedCities.length === 0 || selectedNiches.length === 0) {
-          showMessage('Select at least one city and one niche.', 'error');
-          return;
-        }
-        if (maxLeadsVal < 1 || maxLeadsVal > maxLeads) {
-          showMessage('Please enter between 1 and ' + String(maxLeads) + ' leads.', 'error');
-          return;
-        }
-        setLoading(true);
-        showMessage('Starting...', 'info');
-        fetch('/api/collect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            city: selectedCities,
-            niche: selectedNiches,
-            max_leads: maxLeadsVal
-          })
-        }).then(function (res) {
-          var contentType = res.headers.get('content-type') || '';
-          if (contentType.indexOf('text/csv') !== -1) {
-            return res.text().then(function (text) {
-              var a = document.createElement('a');
-              a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv' }));
-              a.download = 'leads.csv';
-              a.click();
-              URL.revokeObjectURL(a.href);
-              var count = Math.max(0, text.trim().split('\n').length - 1);
-              if (count === 0) {
-                showMessage('0 leads found. Check: API key is set in Vercel (GOOGLE_PLACES_API_KEY), Places API is enabled for your key, and try different city/niche. Only businesses with website + email are included.', 'error');
-              } else {
-                showMessage('Done! ' + count + ' leads. CSV downloaded.', 'success');
-              }
-              setLoading(false);
-            });
-          }
-          return res.json().then(function (data) {
-            if (!res.ok) {
-              showMessage(data.error || 'Request failed', 'error');
-              setLoading(false);
-              return;
-            }
-            var jobId = data.job_id;
-            showMessage('Collecting leads... This may take a few minutes.', 'info');
-            function check() {
-              fetch('/api/status/' + jobId).then(function (r) { return r.json(); }).then(function (s) {
-                if (s.status === 'done') {
-                  showMessage('Done! ' + s.lead_count + ' leads. Download your CSV below.', 'success');
-                  msg.innerHTML = 'Done! ' + s.lead_count + ' leads. <a class="download" href="/api/download/' + jobId + '">Download CSV</a>';
-                  msg.className = 'success';
-                  setLoading(false);
-                  return;
-                }
-                if (s.status === 'error') {
-                  showMessage('Error: ' + (s.error || 'Unknown'), 'error');
-                  setLoading(false);
-                  return;
-                }
-                setTimeout(check, 2500);
-              });
-            }
-            check();
-          });
-        }).catch(function (err) {
-          showMessage('Network error: ' + err.message, 'error');
-          setLoading(false);
-        });
-      });
-    })();
-  </script>
+  <script src="/static/leads-form.js"></script>
 </body>
 </html>
 """
