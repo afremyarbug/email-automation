@@ -1,0 +1,251 @@
+"""Location data for the lead UI: 100 cities per country, selectable in the tree picker.
+
+Extend TOP_CITIES_CH / TOP_CITIES_DE if you need more names for Places search.
+"""
+
+from __future__ import annotations
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+# 100 Swiss cities/towns (Places-friendly names; German/French/Italian spellings as used for search)
+TOP_CITIES_CH: list[str] = _dedupe(
+    [
+        # Original 50
+        "Zurich",
+        "Geneva",
+        "Basel",
+        "Bern",
+        "Lausanne",
+        "Winterthur",
+        "Lucerne",
+        "St. Gallen",
+        "Lugano",
+        "Biel/Bienne",
+        "Thun",
+        "Köniz",
+        "Schaffhausen",
+        "Chur",
+        "Fribourg",
+        "Neuchatel",
+        "Vernier",
+        "Uster",
+        "Sion",
+        "Baden",
+        "Aarau",
+        "Solothurn",
+        "Kreuzlingen",
+        "Frauenfeld",
+        "Wetzikon",
+        "Rapperswil-Jona",
+        "Liestal",
+        "Zug",
+        "Nyon",
+        "Montreux",
+        "Vevey",
+        "Yverdon-les-Bains",
+        "Bellinzona",
+        "Locarno",
+        "Wil",
+        "Sierre",
+        "Martigny",
+        "Olten",
+        "Bulle",
+        "Pully",
+        "Morges",
+        "Thalwil",
+        "Dübendorf",
+        "Kloten",
+        "Emmen",
+        "Horgen",
+        "Schwyz",
+        "Herisau",
+        "Davos",
+        "St. Moritz",
+        # +50
+        "La Chaux-de-Fonds",
+        "Delémont",
+        "Monthey",
+        "Brig-Glis",
+        "Aigle",
+        "Renens",
+        "Ecublens",
+        "Meyrin",
+        "Carouge",
+        "Chiasso",
+        "Mendrisio",
+        "Spiez",
+        "Interlaken",
+        "Langenthal",
+        "Grenchen",
+        "Muttenz",
+        "Pratteln",
+        "Reinach",
+        "Onex",
+        "Lancy",
+        "Versoix",
+        "Appenzell",
+        "Altdorf",
+        "Sarnen",
+        "Glarus",
+        "Stans",
+        "Einsiedeln",
+        "Bülach",
+        "Dietikon",
+        "Regensdorf",
+        "Volketswil",
+        "Wallisellen",
+        "Steffisburg",
+        "Arbon",
+        "Amriswil",
+        "Weinfelden",
+        "Altstätten",
+        "Buchs",
+        "Gossau",
+        "Wattwil",
+        "Flawil",
+        "Sursee",
+        "Hochdorf",
+        "Küssnacht",
+        "Horw",
+        "Kriens",
+        "Ebikon",
+        "Ilanz",
+        "Thusis",
+        "Samedan",
+    ]
+)
+
+# 100 major German cities (Places-friendly names)
+TOP_CITIES_DE: list[str] = _dedupe(
+    [
+        # Original 50
+        "Berlin",
+        "Hamburg",
+        "Munich",
+        "Cologne",
+        "Frankfurt am Main",
+        "Stuttgart",
+        "Düsseldorf",
+        "Dortmund",
+        "Essen",
+        "Leipzig",
+        "Bremen",
+        "Dresden",
+        "Hanover",
+        "Nuremberg",
+        "Duisburg",
+        "Bochum",
+        "Wuppertal",
+        "Bielefeld",
+        "Bonn",
+        "Münster",
+        "Karlsruhe",
+        "Mannheim",
+        "Augsburg",
+        "Wiesbaden",
+        "Gelsenkirchen",
+        "Mönchengladbach",
+        "Braunschweig",
+        "Chemnitz",
+        "Kiel",
+        "Aachen",
+        "Halle (Saale)",
+        "Magdeburg",
+        "Freiburg im Breisgau",
+        "Krefeld",
+        "Lübeck",
+        "Oberhausen",
+        "Erfurt",
+        "Mainz",
+        "Rostock",
+        "Kassel",
+        "Hagen",
+        "Hamm",
+        "Saarbrücken",
+        "Mülheim an der Ruhr",
+        "Potsdam",
+        "Ludwigshafen",
+        "Oldenburg",
+        "Leverkusen",
+        "Osnabrück",
+        "Solingen",
+        # +50
+        "Heidelberg",
+        "Heilbronn",
+        "Pforzheim",
+        "Ulm",
+        "Reutlingen",
+        "Tübingen",
+        "Esslingen am Neckar",
+        "Ludwigsburg",
+        "Konstanz",
+        "Offenburg",
+        "Baden-Baden",
+        "Regensburg",
+        "Ingolstadt",
+        "Fürth",
+        "Würzburg",
+        "Erlangen",
+        "Bayreuth",
+        "Bamberg",
+        "Passau",
+        "Rosenheim",
+        "Landshut",
+        "Neu-Ulm",
+        "Memmingen",
+        "Aschaffenburg",
+        "Schweinfurt",
+        "Herne",
+        "Neuss",
+        "Paderborn",
+        "Recklinghausen",
+        "Remscheid",
+        "Siegen",
+        "Moers",
+        "Bergisch Gladbach",
+        "Ratingen",
+        "Marl",
+        "Lünen",
+        "Viersen",
+        "Castrop-Rauxel",
+        "Bottrop",
+        "Düren",
+        "Göttingen",
+        "Wolfsburg",
+        "Hildesheim",
+        "Salzgitter",
+        "Flensburg",
+        "Lüneburg",
+        "Cottbus",
+        "Jena",
+        "Plauen",
+        "Zwickau",
+    ]
+)
+
+# One group per country: flat list of checkboxes in the picker
+LOCATION_TREE: dict[str, dict[str, list[str]]] = {
+    "CH": {"Top cities (100)": TOP_CITIES_CH},
+    "DE": {"Top cities (100)": TOP_CITIES_DE},
+}
+
+# Flat list for CLI / scrape defaults
+CITIES: list[str] = sorted(_dedupe(TOP_CITIES_CH + TOP_CITIES_DE))
+
+
+def flatten_cities(tree: dict[str, dict[str, list[str]]] | None = None) -> list[str]:
+    t = tree if tree is not None else LOCATION_TREE
+    acc: list[str] = []
+    for country in t.values():
+        for cities in country.values():
+            acc.extend(cities)
+    return sorted(_dedupe(acc))

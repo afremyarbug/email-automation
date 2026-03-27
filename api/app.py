@@ -7,13 +7,14 @@ if str(_root) not in sys.path:
 
 import io
 import csv as csv_module
+import json
 import logging
 import os
 import uuid
 from pathlib import Path
 from threading import Thread
 
-from flask import Flask, Response, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, jsonify, render_template_string, request, send_file, send_from_directory
 
 LEADS_FORM_JS = r"""
 (function () {
@@ -22,33 +23,29 @@ LEADS_FORM_JS = r"""
   var msg = document.getElementById('message');
   var maxLeads = parseInt(form.getAttribute('data-max-leads'), 10) || 1000;
 
+  function getSelectedCitiesForForm() {
+    var customChk = document.getElementById('custom-locations');
+    var customTa = document.getElementById('custom-cities');
+    if (customChk && customChk.checked && customTa) {
+      return customTa.value.split(/[\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+    var ch = window.__pickers && window.__pickers.ch ? window.__pickers.ch.getSelected() : [];
+    var de = window.__pickers && window.__pickers.de ? window.__pickers.de.getSelected() : [];
+    return ch.concat(de);
+  }
+
   var params = new URLSearchParams(window.location.search);
-  var urlCities = params.getAll('city').map(function (c) { try { return decodeURIComponent(c); } catch (e) { return c; } });
   var urlNiches = params.getAll('niche').map(function (n) { try { return decodeURIComponent(n); } catch (e) { return n; } });
   var urlMax = parseInt(params.get('max_leads'), 10);
-  var cityEl = document.getElementById('city');
   var nicheEl = document.getElementById('niche');
   var maxEl = document.getElementById('max_leads');
-  var cityTopBtn = document.getElementById('city-top-20');
-  var cityAllBtn = document.getElementById('city-all');
-  var cityClearBtn = document.getElementById('city-clear');
   var nicheAllBtn = document.getElementById('niche-all');
   var nicheClearBtn = document.getElementById('niche-clear');
-  if (urlCities.length > 0 && cityEl) {
-    Array.from(cityEl.options).forEach(function (opt) { opt.selected = urlCities.indexOf(opt.value) !== -1; });
-  }
   if (urlNiches.length > 0 && nicheEl) {
     Array.from(nicheEl.options).forEach(function (opt) { opt.selected = urlNiches.indexOf(opt.value) !== -1; });
   }
   if (!isNaN(urlMax) && urlMax >= 1 && urlMax <= maxLeads && maxEl) {
     maxEl.value = urlMax;
-  }
-
-  function setSelectedByIndex(selectEl, indexSet) {
-    if (!selectEl) return;
-    Array.from(selectEl.options).forEach(function (opt, idx) {
-      opt.selected = indexSet.has(idx);
-    });
   }
 
   function setAllSelected(selectEl, selected) {
@@ -58,25 +55,6 @@ LEADS_FORM_JS = r"""
     });
   }
 
-  if (cityTopBtn) {
-    cityTopBtn.addEventListener('click', function () {
-      var top = new Set(Array.from({ length: Math.min(20, cityEl.options.length) }, function (_, i) { return i; }));
-      setSelectedByIndex(cityEl, top);
-      showMessage('Selected top 20 cities.', 'info');
-    });
-  }
-  if (cityAllBtn) {
-    cityAllBtn.addEventListener('click', function () {
-      setAllSelected(cityEl, true);
-      showMessage('Selected all cities.', 'info');
-    });
-  }
-  if (cityClearBtn) {
-    cityClearBtn.addEventListener('click', function () {
-      setAllSelected(cityEl, false);
-      showMessage('Cleared city selection.', 'info');
-    });
-  }
   if (nicheAllBtn) {
     nicheAllBtn.addEventListener('click', function () {
       setAllSelected(nicheEl, true);
@@ -98,14 +76,15 @@ LEADS_FORM_JS = r"""
 
   function setLoading(loading) {
     btn.disabled = loading;
-    btn.textContent = loading ? 'Collecting leads...' : 'Get leads';
+    var bl = btn.querySelector('.btn-label');
+    if (bl) bl.textContent = loading ? 'Collecting leads...' : 'Get leads';
+    else btn.textContent = loading ? 'Collecting leads...' : 'Get leads';
   }
 
   form.addEventListener('submit', function (e) {
     e.preventDefault();
-    var cityEl = document.getElementById('city');
     var nicheEl = document.getElementById('niche');
-    var selectedCities = Array.from(cityEl.selectedOptions).map(function (o) { return o.value; });
+    var selectedCities = getSelectedCitiesForForm();
     var selectedNiches = Array.from(nicheEl.selectedOptions).map(function (o) { return o.value; });
     var maxLeadsVal = parseInt(document.getElementById('max_leads').value, 10) || 10;
     if (selectedCities.length === 0 || selectedNiches.length === 0) {
@@ -179,11 +158,10 @@ LEADS_FORM_JS = r"""
 })();
 """
 
+from location_data import LOCATION_TREE
 from scrape_businesses import (
     COLUMNS,
-    CITIES,
     NICHES,
-    load_config,
     run_collection_for_cities_niches,
 )
 
@@ -231,10 +209,19 @@ def index():
     max_leads = MAX_LEADS_VERCEL if VERCEL else MAX_LEADS_WEB
     return render_template_string(
         INDEX_HTML,
-        cities=CITIES,
+        location_tree=LOCATION_TREE,
         niches=NICHES,
         max_leads_web=max_leads,
         is_vercel=VERCEL,
+    )
+
+
+@app.route("/static/locations-picker.js")
+def locations_picker_js():
+    return send_from_directory(
+        _root / "static",
+        "locations-picker.js",
+        mimetype="application/javascript; charset=utf-8",
     )
 
 
@@ -244,16 +231,28 @@ def leads_form_js():
 
 
 def _get_api_key():
-    if VERCEL:
-        key = os.environ.get("GOOGLE_PLACES_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if not key or key == "YOUR_GOOGLE_API_KEY_HERE":
+    """Resolve Places API key: env vars first, then config.json (no sys.exit)."""
+    def _normalize(k: str | None) -> str | None:
+        if not k or not str(k).strip() or str(k).strip() == "YOUR_GOOGLE_API_KEY_HERE":
             return None
+        return str(k).strip()
+
+    key = _normalize(os.environ.get("GOOGLE_PLACES_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    if key:
         return key
-    try:
-        config = load_config(_root / "config.json")
-        return config.get("google_api_key")
-    except SystemExit:
+    if VERCEL:
         return None
+    cfg_path = _root / "config.json"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                data = json.load(f)
+            key = _normalize(data.get("google_api_key") or data.get("api_key"))
+            if key:
+                return key
+        except (OSError, json.JSONDecodeError, TypeError) as e:
+            logging.warning("Could not read %s: %s", cfg_path, e)
+    return None
 
 
 @app.route("/api/collect", methods=["POST"])
@@ -279,7 +278,11 @@ def api_collect():
         msg = (
             "Set GOOGLE_PLACES_API_KEY in Vercel project Environment Variables."
             if VERCEL
-            else "API key not configured. Add config.json with google_api_key or set GOOGLE_PLACES_API_KEY."
+            else (
+                "API key not configured. (1) Copy config.example.json to config.json in the project folder. "
+                "(2) Put your Google Places API key in google_api_key. "
+                "Or set environment variable GOOGLE_PLACES_API_KEY (or GOOGLE_API_KEY) and restart the app."
+            )
         )
         return jsonify({"error": msg}), 500
     if VERCEL:
@@ -435,7 +438,7 @@ INDEX_HTML = """
     .page-inner {
       position: relative;
       z-index: 1;
-      max-width: 560px;
+      max-width: 640px;
       margin: 0 auto;
     }
     .card {
@@ -603,6 +606,353 @@ INDEX_HTML = """
       color: var(--text-muted);
       margin-top: 0.35rem;
       margin-bottom: 1rem;
+    }
+    .loc-hint { margin-top: 1rem; opacity: 0.92; }
+    .section-label-row.locations-heading {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .section-label.locations-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      color: #94a3b8;
+      text-transform: uppercase;
+      margin: 0;
+    }
+    .section-label.locations-label::before,
+    .section-label.locations-label::after { display: none; }
+    .section-label-light { margin-bottom: 0; }
+    .req-star { color: #f87171; font-weight: 700; text-shadow: 0 0 12px rgba(248, 113, 113, 0.35); }
+    .section-help {
+      display: inline-flex;
+      width: 20px;
+      height: 20px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: linear-gradient(145deg, rgba(59, 130, 246, 0.35), rgba(99, 102, 241, 0.2));
+      border: 1px solid rgba(96, 165, 250, 0.35);
+      color: #bfdbfe;
+      font-size: 0.68rem;
+      font-weight: 700;
+      cursor: help;
+      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+      transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+    }
+    .section-help:hover {
+      transform: scale(1.06);
+      box-shadow: 0 4px 14px rgba(59, 130, 246, 0.25);
+    }
+    .loc-try {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin: 0 0 1rem 0;
+    }
+    .loc-try a {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      color: #93c5fd;
+      font-weight: 600;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-decoration: none;
+      background: rgba(59, 130, 246, 0.12);
+      border: 1px solid rgba(59, 130, 246, 0.22);
+      transition: background 0.2s var(--ease), border-color 0.2s var(--ease), transform 0.15s var(--ease);
+    }
+    .loc-try a:hover {
+      background: rgba(59, 130, 246, 0.22);
+      border-color: rgba(96, 165, 250, 0.45);
+      transform: translateY(-1px);
+    }
+    .loc-panels {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+    .loc-light-panel {
+      position: relative;
+      background: linear-gradient(165deg, #ffffff 0%, #f8fafc 48%, #f1f5f9 100%);
+      border: 1px solid rgba(255, 255, 255, 0.65);
+      border-radius: 16px;
+      padding: 1.15rem 1.2rem 1rem;
+      margin-bottom: 0;
+      color: #0f172a;
+      box-shadow:
+        0 0 0 1px rgba(15, 23, 42, 0.08),
+        0 4px 6px -1px rgba(15, 23, 42, 0.06),
+        0 18px 40px -12px rgba(15, 23, 42, 0.18),
+        0 0 40px -20px rgba(124, 111, 205, 0.2);
+      overflow: hidden;
+      transition: box-shadow 0.35s var(--ease), transform 0.35s var(--ease);
+    }
+    .loc-light-panel::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      padding: 1px;
+      background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(148, 163, 184, 0.25), rgba(124, 111, 205, 0.15));
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      pointer-events: none;
+    }
+    .loc-light-panel::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.95), transparent);
+      opacity: 0.7;
+      pointer-events: none;
+    }
+    .loc-light-panel:hover {
+      box-shadow:
+        0 0 0 1px rgba(15, 23, 42, 0.1),
+        0 8px 16px -4px rgba(15, 23, 42, 0.1),
+        0 24px 48px -16px rgba(15, 23, 42, 0.22),
+        0 0 60px -24px rgba(124, 111, 205, 0.28);
+    }
+    .loc-panel-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .loc-code-badge {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 2.25rem;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.7rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      color: #1e293b;
+      background: linear-gradient(180deg, #f8fafc, #e2e8f0);
+      border: 1px solid rgba(148, 163, 184, 0.5);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+    .loc-panel-title-wrap { flex: 1; min-width: 0; }
+    .loc-panel-title {
+      font-weight: 700;
+      font-size: 1.05rem;
+      letter-spacing: -0.02em;
+      color: #0f172a;
+      margin: 0 0 0.2rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      flex-wrap: wrap;
+    }
+    .loc-flag { font-size: 1.25rem; line-height: 1; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.08)); }
+    .loc-sub {
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: #64748b;
+      letter-spacing: 0.02em;
+    }
+    .loc-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      min-height: 2.25rem;
+      margin-bottom: 0.65rem;
+      align-items: center;
+      padding: 0.35rem 0;
+    }
+    .loc-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      background: linear-gradient(180deg, #f1f5f9, #e2e8f0);
+      color: #1e293b;
+      border-radius: 999px;
+      padding: 0.28rem 0.55rem 0.28rem 0.7rem;
+      font-size: 0.76rem;
+      font-weight: 500;
+      max-width: 100%;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+      transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease);
+    }
+    .loc-pill:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+    }
+    .loc-pill-more {
+      color: #475569;
+      background: linear-gradient(180deg, #e0e7ff, #c7d2fe);
+      border-color: rgba(99, 102, 241, 0.25);
+      font-weight: 600;
+    }
+    .loc-pill-x {
+      border: none;
+      background: rgba(255, 255, 255, 0.55);
+      color: #64748b;
+      cursor: pointer;
+      font-size: 0.95rem;
+      line-height: 1;
+      padding: 0.1rem 0.25rem;
+      border-radius: 999px;
+      transition: background 0.15s, color 0.15s;
+    }
+    .loc-pill-x:hover { color: #0f172a; background: rgba(255, 255, 255, 0.95); }
+    .loc-search-row {
+      display: flex;
+      gap: 0;
+      border: 1px solid rgba(148, 163, 184, 0.45);
+      border-radius: 12px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.95);
+      margin-bottom: 0.5rem;
+      box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.8), 0 1px 3px rgba(15, 23, 42, 0.04);
+      transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+    }
+    .loc-search-row:focus-within {
+      border-color: rgba(124, 111, 205, 0.45);
+      box-shadow:
+        inset 0 1px 2px rgba(255, 255, 255, 0.9),
+        0 0 0 3px rgba(124, 111, 205, 0.18),
+        0 4px 16px -4px rgba(124, 111, 205, 0.15);
+    }
+    .loc-search {
+      flex: 1;
+      min-width: 0;
+      border: none;
+      padding: 0.6rem 0.8rem;
+      font-size: 0.88rem;
+      font-family: inherit;
+      color: #0f172a;
+      background: transparent;
+    }
+    .loc-search::placeholder { color: #94a3b8; }
+    .loc-search:focus { outline: none; }
+    .loc-search-btn {
+      border: none;
+      border-left: 1px solid rgba(226, 232, 240, 0.95);
+      background: linear-gradient(180deg, #f8fafc, #f1f5f9);
+      color: #475569;
+      padding: 0 0.95rem;
+      cursor: pointer;
+      font-size: 1.15rem;
+      transition: background 0.2s, color 0.2s;
+    }
+    .loc-search-btn:hover {
+      background: linear-gradient(180deg, #eef2ff, #e0e7ff);
+      color: #4f46e5;
+    }
+    .loc-dropdown {
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 12px;
+      background: linear-gradient(180deg, #ffffff, #fafbfc);
+      max-height: 280px;
+      overflow: auto;
+      margin-bottom: 0.5rem;
+      box-shadow:
+        0 20px 40px -12px rgba(15, 23, 42, 0.2),
+        0 0 0 1px rgba(15, 23, 42, 0.04);
+    }
+    .loc-dropdown::-webkit-scrollbar { width: 6px; }
+    .loc-dropdown::-webkit-scrollbar-thumb {
+      background: linear-gradient(180deg, #c4b5fd, #a78bfa);
+      border-radius: 4px;
+    }
+    .loc-dropdown-toolbar {
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid rgba(226, 232, 240, 0.95);
+      position: sticky;
+      top: 0;
+      background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248, 250, 252, 0.96));
+      backdrop-filter: blur(8px);
+      z-index: 1;
+    }
+    .loc-link-btn {
+      border: none;
+      background: none;
+      color: #4f46e5;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0;
+      letter-spacing: 0.01em;
+    }
+    .loc-link-btn:hover { text-decoration: underline; color: #4338ca; }
+    .loc-tree { padding: 0.4rem 0.6rem 0.75rem; }
+    .loc-region { margin-bottom: 0.35rem; }
+    .loc-region-head {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.25rem 0;
+    }
+    .loc-exp {
+      width: 24px;
+      height: 24px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      background: linear-gradient(180deg, #fff, #f8fafc);
+      cursor: pointer;
+      font-size: 0.85rem;
+      line-height: 1;
+      padding: 0;
+      color: #475569;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .loc-exp:hover { border-color: #a78bfa; color: #5b21b6; }
+    .loc-region-label { font-weight: 600; font-size: 0.85rem; color: #1e293b; }
+    .loc-city-list { margin: 0.15rem 0 0.35rem 1.75rem; }
+    .loc-flat-toolbar { margin-bottom: 0.35rem; padding-left: 0.15rem; }
+    .loc-city-list-flat { margin-left: 0; }
+    .loc-city-row {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.2rem 0.2rem;
+      font-size: 0.82rem;
+      color: #334155;
+      cursor: pointer;
+      border-radius: 6px;
+      transition: background 0.12s;
+    }
+    .loc-city-row:hover { background: rgba(124, 111, 205, 0.06); }
+    .loc-custom-check {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-size: 0.86rem;
+      color: #cbd5e1;
+      cursor: pointer;
+      margin: 0.8rem 0 0.4rem;
+    }
+    .loc-custom-check input { accent-color: #a78bfa; }
+    .loc-custom-ta {
+      width: 100%;
+      padding: 0.65rem 0.85rem;
+      font-size: 0.88rem;
+      font-family: inherit;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      background: rgba(15, 23, 42, 0.45);
+      color: var(--text-primary);
+      resize: vertical;
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.15);
+    }
+    .loc-custom-ta:focus {
+      outline: none;
+      border-color: rgba(167, 139, 250, 0.5);
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.12), 0 0 0 3px rgba(124, 111, 205, 0.2);
     }
     select, input[type="number"] {
       width: 100%;
@@ -832,18 +1182,53 @@ INDEX_HTML = """
       </div>
       <form id="form" data-max-leads="{{ max_leads_web | default(1000) | int }}">
         <div class="field-group city-section">
-          <label class="section-label" for="city">Cities</label>
-          <select id="city" name="city" multiple size="8">
-            {% for c in cities %}
-            <option value="{{ c | e }}">{{ c | e }}</option>
-            {% endfor %}
-          </select>
-          <div class="quick-actions">
-            <button type="button" class="quick-btn" id="city-top-20">Top 20</button>
-            <button type="button" class="quick-btn" id="city-all">All cities</button>
-            <button type="button" class="quick-btn" id="city-clear">Clear</button>
+          <div class="section-label-row locations-heading">
+            <span class="section-label locations-label">Locations</span>
+            <span class="req-star">*</span>
+            <span class="section-help" title="Pick regions, expand with +, then choose cities">?</span>
           </div>
-          <p class="hint">Hold Ctrl (Windows) or Cmd (Mac) to select multiple cities.</p>
+          <p class="loc-try">Try: <a href="#" data-focus-country="CH">CH</a> <a href="#" data-focus-country="DE">DE</a></p>
+          <div class="loc-panels">
+          <div class="loc-light-panel" id="loc-ch">
+            <div class="loc-panel-head">
+              <span class="loc-code-badge">CH</span>
+              <div class="loc-panel-title-wrap">
+                <div class="loc-panel-title"><span class="loc-flag" aria-hidden="true">🇨🇭</span> Switzerland</div>
+                <div class="loc-sub">100 cities — tick to select</div>
+              </div>
+            </div>
+            <div class="loc-pills" data-pills></div>
+            <div class="loc-search-row">
+              <input type="search" class="loc-search" data-search placeholder="Search cantons & cities…" autocomplete="off" />
+              <button type="button" class="loc-search-btn" data-toggle-dropdown aria-expanded="false" aria-label="Open list">⌕</button>
+            </div>
+            <div class="loc-dropdown" data-dropdown hidden>
+              <div class="loc-dropdown-toolbar"><button type="button" class="loc-link-btn" data-unselect>Unselect all</button></div>
+              <div class="loc-tree" data-tree></div>
+            </div>
+          </div>
+          <div class="loc-light-panel" id="loc-de">
+            <div class="loc-panel-head">
+              <span class="loc-code-badge">DE</span>
+              <div class="loc-panel-title-wrap">
+                <div class="loc-panel-title"><span class="loc-flag" aria-hidden="true">🇩🇪</span> Germany</div>
+                <div class="loc-sub">100 cities — tick to select</div>
+              </div>
+            </div>
+            <div class="loc-pills" data-pills></div>
+            <div class="loc-search-row">
+              <input type="search" class="loc-search" data-search placeholder="Search Länder & cities…" autocomplete="off" />
+              <button type="button" class="loc-search-btn" data-toggle-dropdown aria-expanded="false" aria-label="Open list">⌕</button>
+            </div>
+            <div class="loc-dropdown" data-dropdown hidden>
+              <div class="loc-dropdown-toolbar"><button type="button" class="loc-link-btn" data-unselect>Unselect all</button></div>
+              <div class="loc-tree" data-tree></div>
+            </div>
+          </div>
+          </div>
+          <label class="loc-custom-check"><input type="checkbox" id="custom-locations" /> Custom locations</label>
+          <textarea id="custom-cities" class="loc-custom-ta" rows="3" placeholder="One city per line or comma-separated (any country)" style="display:none"></textarea>
+          <p class="hint loc-hint">Each country: open the list (⌕), tick cities (or “Select all”) — 100 per country. Custom locations adds names not in the lists.</p>
         </div>
         <hr class="divider">
         <div class="field-group niche-section">
@@ -905,6 +1290,49 @@ INDEX_HTML = """
         updateProgress();
       });
       updateProgress();
+    })();
+  </script>
+  <script id="location-tree-json" type="application/json">{{ location_tree | tojson }}</script>
+  <script src="/static/locations-picker.js"></script>
+  <script>
+    (function () {
+      var el = document.getElementById('location-tree-json');
+      var tree = { CH: {}, DE: {} };
+      try { tree = el ? JSON.parse(el.textContent) : tree; } catch (e) {}
+      var rootCh = document.getElementById('loc-ch');
+      var rootDe = document.getElementById('loc-de');
+      if (window.LocationPicker && rootCh && rootDe) {
+        window.__pickers = {
+          ch: window.LocationPicker(rootCh, tree.CH || {}),
+          de: window.LocationPicker(rootDe, tree.DE || {})
+        };
+      }
+      var custom = document.getElementById('custom-locations');
+      var ta = document.getElementById('custom-cities');
+      if (custom && ta) {
+        custom.addEventListener('change', function () {
+          var on = custom.checked;
+          ta.style.display = on ? 'block' : 'none';
+          if (window.__pickers && window.__pickers.ch) window.__pickers.ch.setDisabled(on);
+          if (window.__pickers && window.__pickers.de) window.__pickers.de.setDisabled(on);
+        });
+      }
+      document.querySelectorAll('[data-focus-country]').forEach(function (a) {
+        a.addEventListener('click', function (e) {
+          e.preventDefault();
+          var id = a.getAttribute('data-focus-country') === 'CH' ? 'loc-ch' : 'loc-de';
+          var node = document.getElementById(id);
+          if (node) node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+      });
+      var params = new URLSearchParams(window.location.search);
+      var urlCities = params.getAll('city').map(function (c) {
+        try { return decodeURIComponent(c); } catch (e) { return c; }
+      });
+      if (urlCities.length && window.__pickers && window.__pickers.ch && window.__pickers.de) {
+        window.__pickers.ch.selectCities(urlCities);
+        window.__pickers.de.selectCities(urlCities);
+      }
     })();
   </script>
   <script src="/static/leads-form.js"></script>
